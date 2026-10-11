@@ -1,6 +1,6 @@
 """
 Princess Yacht VR Experience — Streamlit edition
-Migrated from Gradio. Requires Python 3.10+.
+Migrated from Gradio. Now powered by OpenRouter. Requires Python 3.10+.
 """
 
 import os
@@ -39,6 +39,17 @@ YACHT_MODELS = {
     },
 }
 
+# OpenRouter free-tier models (https://openrouter.ai/models?max_price=0)
+# ← NEW: model selector map. All suffixed with ":free" → no billing.
+LLM_MODELS = {
+    "Llama 3.1 8B (fast, recommended)": "meta-llama/llama-3.1-8b-instruct:free",
+    "Llama 3.3 70B (smarter, slower)":  "meta-llama/llama-3.3-70b-instruct:free",
+    "Qwen 2.5 7B":                      "qwen/qwen-2.5-7b-instruct:free",
+    "Gemma 3 27B":                      "google/gemma-3-27b-it:free",
+    "DeepSeek Chat v3":                 "deepseek/deepseek-chat-v3-0324:free",
+}
+DEFAULT_LLM_LABEL = "Llama 3.1 8B (fast, recommended)"
+
 DEFAULT_VR_HTML = """
 <div style="text-align:center; padding: 24px; border: 2px dashed #cfd8dc;
             border-radius: 12px; background: #f8fafc; color:#37474f;">
@@ -65,36 +76,43 @@ SUGGESTED_PROMPTS = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# 3. SECRET / CLIENT INITIALIZATION (cached)
+# 3. SECRET / CLIENT INITIALIZATION (cached)   ← CHANGED
 # ─────────────────────────────────────────────────────────────
-def _get_hf_token() -> str | None:
-    """Read HF token from Streamlit secrets, fall back to env var."""
+def _get_openrouter_key() -> str | None:
+    """Read OpenRouter key from Streamlit secrets, fall back to env var."""
     try:
-        if "HF_TOKEN" in st.secrets:
-            return st.secrets["HF_TOKEN"]
+        if "OPENROUTER_API_KEY" in st.secrets:
+            return st.secrets["OPENROUTER_API_KEY"]
     except Exception:
         pass
-    return os.getenv("HF_TOKEN")
+    return os.getenv("OPENROUTER_API_KEY")
 
 
 @st.cache_resource(show_spinner=False)
-def get_hf_client():
-    token = _get_hf_token()
-    if not token:
-        return None, "HF_TOKEN is missing (checked st.secrets and env)."
+def get_openrouter_client():
+    key = _get_openrouter_key()
+    if not key:
+        return None, "OPENROUTER_API_KEY is missing (checked st.secrets and env)."
+
     try:
         http_client = httpx.Client(timeout=60.0)
         client = OpenAI(
-            base_url="https://router.huggingface.co/v1",
-            api_key=token,
+            base_url="https://openrouter.ai/api/v1",       # ← CHANGED
+            api_key=key,
             http_client=http_client,
+            default_headers={
+                # Optional but recommended by OpenRouter — shows up in
+                # your dashboard analytics. Harmless if left in a public repo.
+                "HTTP-Referer": "https://share.streamlit.io",
+                "X-Title": "Princess Yacht VR",
+            },
         )
         return client, None
     except Exception as e:
         return None, f"Client init failed: {e}"
 
 
-hf_client, client_err = get_hf_client()
+or_client, client_err = get_openrouter_client()
 
 # ─────────────────────────────────────────────────────────────
 # 4. SESSION STATE
@@ -109,6 +127,8 @@ if "vr_view" not in st.session_state:
     st.session_state.vr_view = "Full"
 if "pending_prompt" not in st.session_state:
     st.session_state.pending_prompt = None
+if "llm_label" not in st.session_state:                 # ← NEW
+    st.session_state.llm_label = DEFAULT_LLM_LABEL
 
 # ─────────────────────────────────────────────────────────────
 # 5. HELPERS
@@ -146,7 +166,7 @@ def stream_assistant_reply(user_text: str) -> str:
     """Stream tokens into the current st.chat_message context. Returns full text."""
     placeholder = st.empty()
     full = ""
-    if hf_client is None:
+    if or_client is None:
         msg = f"⚠️ **API not configured:** {client_err}"
         placeholder.markdown(msg)
         return msg
@@ -155,9 +175,10 @@ def stream_assistant_reply(user_text: str) -> str:
     messages += st.session_state.messages          # already contains history
     messages.append({"role": "user", "content": user_text})
 
+    model_id = LLM_MODELS[st.session_state.llm_label]    # ← CHANGED
     try:
-        stream = hf_client.chat.completions.create(
-            model="meta-llama/Llama-3.1-8B-Instruct",
+        stream = or_client.chat.completions.create(      # ← CHANGED
+            model=model_id,
             messages=messages,
             temperature=0.7,
             stream=True,
@@ -169,7 +190,14 @@ def stream_assistant_reply(user_text: str) -> str:
                 placeholder.markdown(full + "▌")
         placeholder.markdown(full or "_No response from model._")
     except APIError as e:
-        full = f"⚠️ **API Error:** {getattr(e, 'message', str(e))}"
+        # OpenRouter puts useful info in e.body / e.message
+        detail = getattr(e, "message", str(e))
+        if getattr(e, "status_code", None) == 429:
+            detail = (
+                f"Rate-limited by OpenRouter free tier. "
+                f"Wait ~20s or switch model in the sidebar. ({detail})"
+            )
+        full = f"⚠️ **API Error:** {detail}"
         placeholder.error(full)
     except Exception as e:
         full = f"⚠️ **Connection error:** {e}"
@@ -182,6 +210,7 @@ def export_chat_json() -> str:
     return json.dumps(
         {
             "exported_at": datetime.utcnow().isoformat() + "Z",
+            "llm_model": LLM_MODELS.get(st.session_state.llm_label),
             "messages": st.session_state.messages,
             "vr_model": st.session_state.vr_model,
             "vr_view": st.session_state.vr_view,
@@ -194,10 +223,22 @@ def export_chat_json() -> str:
 # ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🛥️ Princess Yacht VR")
-    if hf_client:
-        st.success("✅ HF API connected", icon="🔌")
+    if or_client:
+        st.success("✅ OpenRouter connected", icon="🔌")   # ← CHANGED
     else:
         st.error(f"❌ {client_err}", icon="🔌")
+
+    st.divider()
+
+    # ← NEW: model selector
+    st.markdown("### 🧠 Language Model")
+    st.selectbox(
+        "Model (free tier)",
+        list(LLM_MODELS.keys()),
+        index=list(LLM_MODELS.keys()).index(st.session_state.llm_label),
+        key="llm_label",
+        help="All models below are OpenRouter free-tier (no billing).",
+    )
 
     st.divider()
 
@@ -236,7 +277,7 @@ with st.sidebar:
             use_container_width=True,
         )
 
-    st.caption("Migrated from Gradio → Streamlit · Princess Yachts demo")
+    st.caption("Migrated from Gradio → Streamlit · Powered by OpenRouter")
 
 # ─────────────────────────────────────────────────────────────
 # 7. MAIN LAYOUT
