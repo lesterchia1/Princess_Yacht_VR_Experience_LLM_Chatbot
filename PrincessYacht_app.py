@@ -1,12 +1,12 @@
 """
 Princess Yacht VR Experience — Streamlit edition
-Migrated from Gradio. Now powered by OpenRouter. Requires Python 3.10+.
+Migrated from Gradio. Now powered by Groq. Requires Python 3.10+.
 """
 
 import os
 import json
 import traceback
-from datetime import datetime, timezone          # ← FIX: timezone-aware datetimes
+from datetime import datetime, timezone
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -39,26 +39,20 @@ YACHT_MODELS = {
     },
 }
 
+# ─────────────────────────────────────────────────────────────
+# LLM MODEL OPTIONS — Groq (verified free tier, Oct 2026)
+# llama-3.1-8b-instant was shut down for free/developer tiers on 2026-08-16.
+# Groq's official recommended replacement is openai/gpt-oss-20b.
+# ─────────────────────────────────────────────────────────────
 LLM_MODELS = {
-    "🛡️ Auto (Free Router — picks a free model)": "openrouter/free",
-    "Nemotron 3 Ultra 550B (reasoning, 1M)":       "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "Nemotron 3 Super 120B (balanced, 1M)":        "nvidia/nemotron-3-super-120b-a12b:free",
-    "Qwen 3.6 Plus (1M, strong coding)":           "qwen/qwen3.6-plus:free",
-    "Qwen 3 Coder 480B (1M, tool calling)":        "qwen/qwen3-coder:free",
-    "Llama 3.3 70B (proven, 131K)":                "meta-llama/llama-3.3-70b-instruct:free",
-    "DeepSeek R1 (reasoning, 164K)":               "deepseek/deepseek-r1:free",
-    "Gemma 3 27B (vision, 131K)":                  "google/gemma-3-27b-it:free",
-    "Gemma 3 12B (vision, 131K)":                  "google/gemma-3-12b-it:free",
-    "Mistral Small 3.1 24B (vision, 128K)":        "mistralai/mistral-small-3.1-24b-instruct:free",
-    "Step 3.5 Flash (fast, 256K)":                 "stepfun/step-3.5-flash:free",
-    "GLM 4.5 Air (131K)":                          "z-ai/glm-4.5-air:free",
-    "Trinity Large (131K)":                        "arcee-ai/trinity-large-preview:free",
-    "Nemotron Nano 30B (256K)":                    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "GPT-OSS 120B (131K)":                         "openai/gpt-oss-120b:free",
-    "GPT-OSS 20B (131K)":                          "openai/gpt-oss-20b:free",
-    "MiniMax M2.5 (204K)":                         "minimax/minimax-m2.5:free",
+    "🧠 GPT-OSS 20B (fast reasoning, 1,000 RPD)":     "openai/gpt-oss-20b",
+    "🧠 GPT-OSS 120B (stronger reasoning, 1,000 RPD)": "openai/gpt-oss-120b",
+    "🚀 Groq Compound (multi-model system, 250 RPD)":  "groq/compound",
+    "⚡ Qwen 3.6 27B (high TPM, 1,000 RPD)":           "qwen/qwen3.6-27b",
+    "👁️ Qwen 3.8 27B (vision, 1,000 RPD)":             "qwen/qwen3.8-27b",
+    "🛡️ GPT-OSS Safeguard 20B (safety-focused)":       "openai/gpt-oss-safeguard-20b",
 }
-DEFAULT_LLM_LABEL = "🛡️ Auto (Free Router — picks a free model)"
+DEFAULT_LLM_LABEL = "🧠 GPT-OSS 20B (fast reasoning, 1,000 RPD)"
 
 DEFAULT_VR_HTML = """
 <div style="text-align:center; padding: 24px; border: 2px dashed #cfd8dc;
@@ -86,39 +80,36 @@ SUGGESTED_PROMPTS = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# 3. SECRET / CLIENT INITIALIZATION (cached)
+# 3. SECRET / CLIENT INITIALIZATION (cached)   ← CHANGED: Groq
 # ─────────────────────────────────────────────────────────────
-def _get_openrouter_key() -> str | None:
+def _get_groq_key() -> str | None:
+    """Read Groq API key from Streamlit secrets, fall back to env var."""
     try:
-        if "OPENROUTER_API_KEY" in st.secrets:
-            return st.secrets["OPENROUTER_API_KEY"]
+        if "GROQ_API_KEY" in st.secrets:
+            return st.secrets["GROQ_API_KEY"]
     except Exception:
         pass
-    return os.getenv("OPENROUTER_API_KEY")
+    return os.getenv("GROQ_API_KEY")
 
 
 @st.cache_resource(show_spinner=False)
-def get_openrouter_client():
-    key = _get_openrouter_key()
+def get_groq_client():
+    key = _get_groq_key()
     if not key:
-        return None, "OPENROUTER_API_KEY is missing (checked st.secrets and env)."
+        return None, "GROQ_API_KEY is missing (checked st.secrets and env)."
     try:
         http_client = httpx.Client(timeout=60.0)
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
+            base_url="https://api.groq.com/openai/v1",       # ← Groq base URL
             api_key=key,
             http_client=http_client,
-            default_headers={
-                "HTTP-Referer": "https://share.streamlit.io",
-                "X-Title": "Princess Yacht VR",
-            },
         )
         return client, None
     except Exception as e:
         return None, f"Client init failed: {e}"
 
 
-or_client, client_err = get_openrouter_client()
+or_client, client_err = get_groq_client()      # variable name kept for minimal diff
 
 # ─────────────────────────────────────────────────────────────
 # 4. SESSION STATE
@@ -127,7 +118,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "vr_html" not in st.session_state:
     st.session_state.vr_html = DEFAULT_VR_HTML
-if "vr_url" not in st.session_state:               # ← NEW: URL for st.iframe
+if "vr_url" not in st.session_state:
     st.session_state.vr_url = None
 if "vr_model" not in st.session_state:
     st.session_state.vr_model = "Princess Y85"
@@ -137,8 +128,6 @@ if "pending_prompt" not in st.session_state:
     st.session_state.pending_prompt = None
 if "llm_label" not in st.session_state:
     st.session_state.llm_label = DEFAULT_LLM_LABEL
-if "llm_models" not in st.session_state:
-    st.session_state.llm_models = dict(LLM_MODELS)
 
 # ─────────────────────────────────────────────────────────────
 # 5. HELPERS
@@ -169,39 +158,6 @@ def render_iframe(src: str, height: int = 680) -> None:
         components.iframe(src, height=height, scrolling=True)
 
 
-def fetch_free_models_live() -> dict[str, str]:
-    """Query OpenRouter /api/v1/models and keep models with $0 pricing."""
-    try:
-        resp = httpx.get("https://openrouter.ai/api/v1/models", timeout=15.0)
-        resp.raise_for_status()
-        payload = resp.json()
-        free: dict[str, str] = {}
-        for m in payload.get("data", []):
-            pricing = m.get("pricing") or {}
-            if (
-                str(pricing.get("prompt")) == "0"
-                and str(pricing.get("completion")) == "0"
-            ):
-                model_id = m.get("id", "")
-                if not model_id:
-                    continue
-                name = m.get("name") or model_id
-                ctx = m.get("context_length")
-                label = f"{name} ({ctx:,} ctx)" if ctx else name
-                free[label] = model_id
-        return {"🛡️ Auto (Free Router — picks a free model)": "openrouter/free", **free}
-    except Exception:
-        return dict(LLM_MODELS)
-
-
-# ── FIX: refresh handler runs BEFORE the widget is instantiated ──
-def _on_refresh_models() -> None:
-    """on_click callback — safe to modify widget keys here."""
-    st.session_state.llm_models = fetch_free_models_live()
-    if st.session_state.llm_label not in st.session_state.llm_models:
-        st.session_state.llm_label = DEFAULT_LLM_LABEL
-
-
 def stream_assistant_reply(user_text: str) -> str:
     placeholder = st.empty()
     full = ""
@@ -214,9 +170,9 @@ def stream_assistant_reply(user_text: str) -> str:
     messages += st.session_state.messages
     messages.append({"role": "user", "content": user_text})
 
-    model_id = st.session_state.llm_models.get(
-        st.session_state.llm_label, "openrouter/free"
-    )
+    # ← CHANGED: direct lookup from static dict
+    model_id = LLM_MODELS.get(st.session_state.llm_label, "openai/gpt-oss-20b")
+
     try:
         stream = or_client.chat.completions.create(
             model=model_id,
@@ -234,7 +190,7 @@ def stream_assistant_reply(user_text: str) -> str:
         detail = getattr(e, "message", str(e))
         if getattr(e, "status_code", None) == 429:
             detail = (
-                f"Rate-limited by OpenRouter free tier (20 RPM / 50 RPD). "
+                f"Rate-limited by Groq free tier (30 RPM / 1,000 RPD). "
                 f"Wait ~20s or switch model. ({detail})"
             )
         full = f"⚠️ **API Error:** {detail}"
@@ -249,9 +205,8 @@ def stream_assistant_reply(user_text: str) -> str:
 def export_chat_json() -> str:
     return json.dumps(
         {
-            # ← FIX: timezone-aware ISO timestamp
             "exported_at": datetime.now(timezone.utc).isoformat(),
-            "llm_model": st.session_state.llm_models.get(st.session_state.llm_label),
+            "llm_model": LLM_MODELS.get(st.session_state.llm_label),  # ← direct lookup
             "messages": st.session_state.messages,
             "vr_model": st.session_state.vr_model,
             "vr_view": st.session_state.vr_view,
@@ -265,17 +220,15 @@ def export_chat_json() -> str:
 with st.sidebar:
     st.markdown("## 🛥️ Princess Yacht VR")
     if or_client:
-        st.success("✅ OpenRouter connected", icon="🔌")
+        st.success("✅ Groq connected", icon="🔌")     # ← CHANGED
     else:
         st.error(f"❌ {client_err}", icon="🔌")
 
     st.divider()
 
-    # ── Model selector ─────────────────────────────────────────
+    # ── Model selector (static — Groq models are stable) ──────
     st.markdown("### 🧠 Language Model")
-    models_dict = st.session_state.llm_models
-    labels = list(models_dict.keys())
-
+    labels = list(LLM_MODELS.keys())
     current = st.session_state.llm_label
     if current not in labels:
         current = DEFAULT_LLM_LABEL
@@ -285,19 +238,11 @@ with st.sidebar:
         labels,
         index=labels.index(current),
         key="llm_label",
-        help="All models listed have $0 pricing on OpenRouter. "
-             "Use 'Auto' to let OpenRouter pick a working free model.",
+        help="All models below are available on Groq's permanent free tier. "
+             "No credit card required.",
     )
+    st.caption("⚡ Groq free tier — no live refresh needed.")
 
-    # ── Refresh button (on_click callback — no state-mutation error) ──
-    st.button(
-        "🔄 Refresh free models",
-        use_container_width=True,
-        on_click=_on_refresh_models,     # ← FIX: callback, not inline body
-        help="Queries OpenRouter /api/v1/models and filters for pricing.prompt == '0'.",
-    )
-
-    st.caption(f"Loaded **{len(models_dict)}** free models.")
     st.divider()
 
     # ── VR controls ────────────────────────────────────────────
@@ -317,7 +262,7 @@ with st.sidebar:
         st.session_state.vr_model = model_pick
         st.session_state.vr_view = view_pick
         st.session_state.vr_url = get_vr_url(model_pick, view_pick)
-        st.session_state.vr_html = DEFAULT_VR_HTML  # placeholder unused when url set
+        st.session_state.vr_html = DEFAULT_VR_HTML
         st.rerun()
 
     st.divider()
@@ -333,13 +278,12 @@ with st.sidebar:
         st.download_button(
             "Export JSON",
             data=export_chat_json(),
-            # ← FIX: timezone-aware timestamp
             file_name=f"yacht_chat_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.json",
             mime="application/json",
             use_container_width=True,
         )
 
-    st.caption("Migrated from Gradio → Streamlit · Powered by OpenRouter")
+    st.caption("Migrated from Gradio → Streamlit · Powered by Groq")
 
 # ─────────────────────────────────────────────────────────────
 # 7. MAIN LAYOUT
@@ -401,9 +345,7 @@ with right:
         f"Showing **{st.session_state.vr_model}** · **{st.session_state.vr_view}** view"
     )
     if st.session_state.vr_url:
-        # ← FIX: st.iframe (with fallback), plus "open in new tab" link
         render_iframe(st.session_state.vr_url, height=600)
         st.caption(f"[Open in new tab ↗]({st.session_state.vr_url})")
     else:
-        # Placeholder state — safe to render as HTML via markdown
         st.markdown(st.session_state.vr_html, unsafe_allow_html=True)
