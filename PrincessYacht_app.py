@@ -44,7 +44,7 @@ YACHT_MODELS = {
 LLM_MODELS = {
     "Llama 3.1 8B (fast, recommended)": "meta-llama/llama-3.1-8b-instruct:free",
     "Llama 3.3 70B (smarter, slower)":  "meta-llama/llama-3.3-70b-instruct:free",
-    "Qwen 2.5 7B":                      "qwen/qwen-2.5-7b-instruct:free",
+    "Qwen 2.5 7B":                      "qwen/qwen-2.5-7b-instruct",
     "Gemma 3 27B":                      "google/gemma-3-27b-it:free",
     "DeepSeek Chat v3":                 "deepseek/deepseek-chat-v3-0324:free",
 }
