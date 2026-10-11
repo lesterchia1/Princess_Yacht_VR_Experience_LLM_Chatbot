@@ -1,6 +1,12 @@
 """
 Princess Yacht VR Experience — Streamlit edition
 Migrated from Gradio. Powered by Groq. Requires Python 3.10+.
+
+NOTE: Streamlit Cloud wraps every rendered HTML element inside a sandboxed
+iframe with restrictive Permissions-Policy headers. This blocks WebXR,
+fullscreen, and autoplay for third-party VR viewers like vrcloud.com.
+The only reliable way to launch the VR experience is via a new browser tab,
+which is what the primary action button below does.
 """
 
 import os
@@ -14,7 +20,7 @@ import httpx
 from openai import OpenAI, APIError
 
 # ─────────────────────────────────────────────────────────────
-# 1. PAGE CONFIG (must be first Streamlit call)
+# 1. PAGE CONFIG
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Princess Yacht VR",
@@ -24,7 +30,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────
-# 2. CONSTANTS / VR CONFIG
+# 2. CONSTANTS
 # ─────────────────────────────────────────────────────────────
 YACHT_MODELS = {
     "Princess Y85": {
@@ -39,11 +45,11 @@ YACHT_MODELS = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────
-# LLM MODEL OPTIONS — Groq (verified free tier, Oct 2026)
-# llama-3.1-8b-instant was shut down for free/developer tiers on 2026-08-16.
-# Groq's official recommended replacement is openai/gpt-oss-20b.
-# ─────────────────────────────────────────────────────────────
+YACHT_PREVIEW = {
+    "Princess Y85":  "https://images.unsplash.com/photo-1566847438217-76e82d383f84?w=800",
+    "Princess X95":  "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=800",
+}
+
 LLM_MODELS = {
     "🧠 GPT-OSS 20B (fast reasoning, 1,000 RPD)":     "openai/gpt-oss-20b",
     "🧠 GPT-OSS 120B (stronger reasoning, 1,000 RPD)": "openai/gpt-oss-120b",
@@ -80,10 +86,9 @@ SUGGESTED_PROMPTS = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# 3. SECRET / CLIENT INITIALIZATION (cached)
+# 3. CLIENT INITIALIZATION
 # ─────────────────────────────────────────────────────────────
 def _get_groq_key() -> str | None:
-    """Read Groq API key from Streamlit secrets, fall back to env var."""
     try:
         if "GROQ_API_KEY" in st.secrets:
             return st.secrets["GROQ_API_KEY"]
@@ -133,7 +138,6 @@ if "llm_label" not in st.session_state:
 # 5. HELPERS
 # ─────────────────────────────────────────────────────────────
 def get_vr_url(model: str, view: str) -> str:
-    """Return the VR URL for the given model/view, with fallback."""
     return (
         YACHT_MODELS.get(model, {}).get(view)
         or YACHT_MODELS["Princess Y85"]["Full"]
@@ -141,10 +145,8 @@ def get_vr_url(model: str, view: str) -> str:
 
 
 def detect_vr_intent(text: str) -> tuple[str, str] | None:
-    """Return (model, view) if the text mentions a VR switch, else None."""
     t = text.lower()
     if not any(k in t for k in ("vr", "virtual", "view", "show me", "tour")):
-        # still allow pure model mentions to switch
         if not any(k in t for k in ("x95", "y85")):
             return None
     model = "Princess X95" if "x95" in t else "Princess Y85"
@@ -152,30 +154,20 @@ def detect_vr_intent(text: str) -> tuple[str, str] | None:
     return model, view
 
 
-# ── VR RENDERER — mirrors Gradio's gr.HTML() exactly ──────────
-def render_vr(vr_url: str, height: int = 600) -> None:
+def try_embed_iframe(vr_url: str, height: int = 400) -> bool:
     """
-    Render the VR viewer using components.html.
-
-    IMPORTANT: This mirrors Gradio's gr.HTML() behavior — the raw <iframe>
-    tag is inserted with NO `sandbox` attribute and NO `allow` attribute
-    overrides. Adding a `sandbox` attribute to the inner iframe resets its
-    permission set and silently breaks WebXR initialization on vrcloud.com.
+    Best-effort inline embed. Streamlit Cloud frequently blocks this due to
+    sandbox / Permissions-Policy restrictions on third-party VR viewers.
+    Returns True if the embed call succeeded (does not guarantee rendering).
     """
-    html = f'''
-    <div style="text-align:center">
-        <h3 style="color:#2c3e50; margin:0 0 8px 0;">
-            🚢 {st.session_state.vr_model} – {st.session_state.vr_view} VR View
-        </h3>
-        <iframe src="{vr_url}"
-                width="100%"
-                height="{height}"
-                style="border:none; border-radius:10px;"></iframe>
-    </div>
-    '''
-    # +60 px to fit the heading line; scrolling=False so Streamlit does not
-    # wrap its own scrollbar around the VR canvas.
-    components.html(html, height=height + 60, scrolling=False)
+    try:
+        if hasattr(st, "iframe"):
+            st.iframe(vr_url, height=height)
+        else:
+            components.iframe(vr_url, height=height, scrolling=True)
+        return True
+    except Exception:
+        return False
 
 
 def stream_assistant_reply(user_text: str) -> str:
@@ -245,7 +237,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Model selector ─────────────────────────────────────────
     st.markdown("### 🧠 Language Model")
     labels = list(LLM_MODELS.keys())
     current = st.session_state.llm_label
@@ -257,14 +248,12 @@ with st.sidebar:
         labels,
         index=labels.index(current),
         key="llm_label",
-        help="All models below are available on Groq's permanent free tier. "
-             "No credit card required.",
+        help="All models below are available on Groq's permanent free tier.",
     )
     st.caption("⚡ Groq free tier — no live refresh needed.")
 
     st.divider()
 
-    # ── VR controls ────────────────────────────────────────────
     st.markdown("### 🎛️ VR Controls")
     model_pick = st.selectbox(
         "Yacht model",
@@ -345,7 +334,6 @@ with left:
             with st.chat_message("user", avatar="🧑‍✈️"):
                 st.markdown(user_input)
 
-            # VR intent detection — updates right panel
             vr_hit = detect_vr_intent(user_input)
             if vr_hit:
                 m, v = vr_hit
@@ -368,9 +356,88 @@ with right:
     )
 
     if st.session_state.vr_url:
-        # Bare iframe, no sandbox — identical to Gradio's gr.HTML() output
-        render_vr(st.session_state.vr_url, height=600)
-        st.caption(f"[Open in new tab ↗]({st.session_state.vr_url})")
+        # ── Preview card ──────────────────────────────────────
+        preview_src = YACHT_PREVIEW.get(
+            st.session_state.vr_model, YACHT_PREVIEW["Princess Y85"]
+        )
+        st.markdown(
+            f"""
+            <div style="border-radius:12px; overflow:hidden;
+                        box-shadow:0 4px 12px rgba(0,0,0,0.12);
+                        margin-bottom:12px;">
+                <img src="{preview_src}" alt="{st.session_state.vr_model}"
+                     style="width:100%; height:200px; object-fit:cover;
+                            display:block;" />
+                <div style="padding:12px; background:#f8fafc;">
+                    <div style="font-weight:600; color:#0f172a;
+                                font-size:15px;">
+                        🚢 {st.session_state.vr_model}
+                    </div>
+                    <div style="color:#607d8b; font-size:13px;">
+                        {st.session_state.vr_view} view · WebXR ready
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ── PRIMARY ACTION: Launch VR in new tab ──────────────
+        st.link_button(
+            "🚀 Launch VR Experience",
+            st.session_state.vr_url,
+            use_container_width=True,
+            type="primary",
+            help="Opens the full WebXR viewer in a new browser tab. "
+                 "This is required because Streamlit's sandbox blocks "
+                 "inline WebXR initialization.",
+        )
+
+        # ── Secondary: best-effort inline embed ───────────────
+        with st.expander("🌐 Try inline preview (may be blocked)", expanded=False):
+            st.caption(
+                "Streamlit Cloud wraps third-party iframes in a sandbox "
+                "that blocks WebXR and autoplay. The preview below will "
+                "often be blank — use **Launch VR Experience** above for "
+                "the full experience."
+            )
+            try_embed_iframe(st.session_state.vr_url, height=400)
+
+        # ── Diagnostic info ───────────────────────────────────
+        with st.expander("🔍 Troubleshooting"):
+            st.markdown(
+                f"""
+                **VR URL**
+
+                `{st.session_state.vr_url}`
+
+                **Why isn't it embedded inline?**
+
+                Gradio injects `<iframe>` tags directly into the top-level
+                page DOM, so the browser grants the iframe full permissions
+                (WebXR, fullscreen, autoplay). Streamlit always wraps user
+                content in its own sandboxed iframe, which strips these
+                permissions. This is a platform-level limitation of
+                Streamlit Cloud — not a bug in this app.
+
+                **What works reliably?**
+
+                The **🚀 Launch VR Experience** button opens the viewer in
+                a full browser tab, where it renders exactly as it did in
+                the original Gradio app.
+
+                **Browser requirements for WebXR**
+
+                - Chrome / Edge 90+ on desktop
+                - Meta Quest Browser
+                - Safari 17+ (limited)
+                - Apple Vision Pro Safari
+                """
+            )
     else:
-        # Placeholder state — no iframe inside, so st.markdown is safe
         st.markdown(st.session_state.vr_html, unsafe_allow_html=True)
+        st.info(
+            "💡 Click **▶️ Load VR** in the sidebar, or ask the chat "
+            "*“show me the X95 full VR view”*.",
+            icon="ℹ️",
+        )
