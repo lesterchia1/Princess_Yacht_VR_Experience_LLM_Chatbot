@@ -6,7 +6,7 @@ Migrated from Gradio. Now powered by OpenRouter. Requires Python 3.10+.
 import os
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone          # ← FIX: timezone-aware datetimes
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -39,11 +39,6 @@ YACHT_MODELS = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────
-# LLM MODEL OPTIONS — Verified free on OpenRouter (Oct 2026)
-# All IDs below appear in OpenRouter's free catalog with $0 prompt pricing.
-# Sources: OpenRouter free catalog, community-verified free lists.
-# ─────────────────────────────────────────────────────────────
 LLM_MODELS = {
     "🛡️ Auto (Free Router — picks a free model)": "openrouter/free",
     "Nemotron 3 Ultra 550B (reasoning, 1M)":       "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -94,7 +89,6 @@ SUGGESTED_PROMPTS = [
 # 3. SECRET / CLIENT INITIALIZATION (cached)
 # ─────────────────────────────────────────────────────────────
 def _get_openrouter_key() -> str | None:
-    """Read OpenRouter key from Streamlit secrets, fall back to env var."""
     try:
         if "OPENROUTER_API_KEY" in st.secrets:
             return st.secrets["OPENROUTER_API_KEY"]
@@ -133,6 +127,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "vr_html" not in st.session_state:
     st.session_state.vr_html = DEFAULT_VR_HTML
+if "vr_url" not in st.session_state:               # ← NEW: URL for st.iframe
+    st.session_state.vr_url = None
 if "vr_model" not in st.session_state:
     st.session_state.vr_model = "Princess Y85"
 if "vr_view" not in st.session_state:
@@ -141,27 +137,18 @@ if "pending_prompt" not in st.session_state:
     st.session_state.pending_prompt = None
 if "llm_label" not in st.session_state:
     st.session_state.llm_label = DEFAULT_LLM_LABEL
-if "llm_models" not in st.session_state:                # ← NEW
-    st.session_state.llm_models = dict(LLM_MODELS)      # ← NEW
+if "llm_models" not in st.session_state:
+    st.session_state.llm_models = dict(LLM_MODELS)
 
 # ─────────────────────────────────────────────────────────────
 # 5. HELPERS
 # ─────────────────────────────────────────────────────────────
-def generate_vr_html(model: str, view: str) -> str:
-    link = YACHT_MODELS.get(model, {}).get(view) \
-           or YACHT_MODELS["Princess Y85"]["Full"]
-    return f"""
-    <div style="text-align:center">
-        <h3 style="color:#2c3e50; margin-bottom:6px;">🚢 {model} – {view} VR View</h3>
-        <p style="font-size:12px; color:#607d8b; margin-top:0;">
-            <a href="{link}" target="_blank" rel="noopener">Open in new tab ↗</a>
-        </p>
-        <iframe src="{link}" width="100%" height="600px"
-                style="border:none; border-radius:10px;"
-                allow="xr-spatial-tracking; fullscreen; gyroscope; accelerometer"
-                allowfullscreen></iframe>
-    </div>
-    """
+def get_vr_url(model: str, view: str) -> str:
+    """Return the VR URL for the given model/view, with fallback."""
+    return (
+        YACHT_MODELS.get(model, {}).get(view)
+        or YACHT_MODELS["Princess Y85"]["Full"]
+    )
 
 
 def detect_vr_intent(text: str) -> tuple[str, str] | None:
@@ -174,24 +161,23 @@ def detect_vr_intent(text: str) -> tuple[str, str] | None:
     return model, view
 
 
-# ── NEW: Live free-model fetcher ──────────────────────────────
+def render_iframe(src: str, height: int = 680) -> None:
+    """Render a URL as an iframe — uses st.iframe if available, else fallback."""
+    if hasattr(st, "iframe"):
+        st.iframe(src, height=height)
+    else:
+        components.iframe(src, height=height, scrolling=True)
+
+
 def fetch_free_models_live() -> dict[str, str]:
-    """
-    Query OpenRouter's /api/v1/models endpoint and return a dict of
-    {display_label: model_id} for models whose pricing.prompt == '0'.
-    Falls back to the static LLM_MODELS dict on any error.
-    """
+    """Query OpenRouter /api/v1/models and keep models with $0 pricing."""
     try:
-        resp = httpx.get(
-            "https://openrouter.ai/api/v1/models",
-            timeout=15.0,
-        )
+        resp = httpx.get("https://openrouter.ai/api/v1/models", timeout=15.0)
         resp.raise_for_status()
         payload = resp.json()
-        free = {}
+        free: dict[str, str] = {}
         for m in payload.get("data", []):
             pricing = m.get("pricing") or {}
-            # A model is free if both prompt and completion prices are 0
             if (
                 str(pricing.get("prompt")) == "0"
                 and str(pricing.get("completion")) == "0"
@@ -199,25 +185,21 @@ def fetch_free_models_live() -> dict[str, str]:
                 model_id = m.get("id", "")
                 if not model_id:
                     continue
-                # Build a friendly label: strip ':free', add context
                 name = m.get("name") or model_id
                 ctx = m.get("context_length")
                 label = f"{name} ({ctx:,} ctx)" if ctx else name
                 free[label] = model_id
-        # Always prepend the auto-router
         return {"🛡️ Auto (Free Router — picks a free model)": "openrouter/free", **free}
-    except Exception as e:
-        # Silently fall back — the static dict is always available
+    except Exception:
         return dict(LLM_MODELS)
 
 
-# ── NEW: Refresh button handler ───────────────────────────────
-def refresh_models():
+# ── FIX: refresh handler runs BEFORE the widget is instantiated ──
+def _on_refresh_models() -> None:
+    """on_click callback — safe to modify widget keys here."""
     st.session_state.llm_models = fetch_free_models_live()
-    # If the previously-selected label no longer exists, reset to Auto
     if st.session_state.llm_label not in st.session_state.llm_models:
         st.session_state.llm_label = DEFAULT_LLM_LABEL
-    st.toast(f"Loaded {len(st.session_state.llm_models)} free models.", icon="✅")
 
 
 def stream_assistant_reply(user_text: str) -> str:
@@ -267,7 +249,8 @@ def stream_assistant_reply(user_text: str) -> str:
 def export_chat_json() -> str:
     return json.dumps(
         {
-            "exported_at": datetime.utcnow().isoformat() + "Z",
+            # ← FIX: timezone-aware ISO timestamp
+            "exported_at": datetime.now(timezone.utc).isoformat(),
             "llm_model": st.session_state.llm_models.get(st.session_state.llm_label),
             "messages": st.session_state.messages,
             "vr_model": st.session_state.vr_model,
@@ -288,12 +271,11 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Model selector (live, refreshable) ────────────────────
+    # ── Model selector ─────────────────────────────────────────
     st.markdown("### 🧠 Language Model")
     models_dict = st.session_state.llm_models
     labels = list(models_dict.keys())
 
-    # Guard: selected label must exist after a refresh
     current = st.session_state.llm_label
     if current not in labels:
         current = DEFAULT_LLM_LABEL
@@ -303,21 +285,19 @@ with st.sidebar:
         labels,
         index=labels.index(current),
         key="llm_label",
-        help="All models listed have $0 prompt pricing on OpenRouter. "
+        help="All models listed have $0 pricing on OpenRouter. "
              "Use 'Auto' to let OpenRouter pick a working free model.",
     )
 
-    # ── Refresh button ─────────────────────────────────────────
-    if st.button(
+    # ── Refresh button (on_click callback — no state-mutation error) ──
+    st.button(
         "🔄 Refresh free models",
         use_container_width=True,
+        on_click=_on_refresh_models,     # ← FIX: callback, not inline body
         help="Queries OpenRouter /api/v1/models and filters for pricing.prompt == '0'.",
-    ):
-        refresh_models()
-        st.rerun()
+    )
 
     st.caption(f"Loaded **{len(models_dict)}** free models.")
-
     st.divider()
 
     # ── VR controls ────────────────────────────────────────────
@@ -336,7 +316,8 @@ with st.sidebar:
     if st.button("▶️ Load VR", use_container_width=True, type="primary"):
         st.session_state.vr_model = model_pick
         st.session_state.vr_view = view_pick
-        st.session_state.vr_html = generate_vr_html(model_pick, view_pick)
+        st.session_state.vr_url = get_vr_url(model_pick, view_pick)
+        st.session_state.vr_html = DEFAULT_VR_HTML  # placeholder unused when url set
         st.rerun()
 
     st.divider()
@@ -346,12 +327,14 @@ with st.sidebar:
         if st.button("Clear chat", use_container_width=True):
             st.session_state.messages = []
             st.session_state.vr_html = DEFAULT_VR_HTML
+            st.session_state.vr_url = None
             st.rerun()
     with col_b:
         st.download_button(
             "Export JSON",
             data=export_chat_json(),
-            file_name=f"yacht_chat_{datetime.utcnow():%Y%m%d_%H%M%S}.json",
+            # ← FIX: timezone-aware timestamp
+            file_name=f"yacht_chat_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.json",
             mime="application/json",
             use_container_width=True,
         )
@@ -403,7 +386,7 @@ with left:
                 m, v = vr_hit
                 st.session_state.vr_model = m
                 st.session_state.vr_view = v
-                st.session_state.vr_html = generate_vr_html(m, v)
+                st.session_state.vr_url = get_vr_url(m, v)
 
             with st.chat_message("assistant", avatar="⚓"):
                 reply = stream_assistant_reply(user_input)
@@ -411,9 +394,16 @@ with left:
         st.session_state.messages.append({"role": "assistant", "content": reply})
         st.rerun()
 
+# ── RIGHT: VR ─────────────────────────────────────────────────
 with right:
     st.subheader("🌐 Virtual Reality Viewer")
     st.caption(
         f"Showing **{st.session_state.vr_model}** · **{st.session_state.vr_view}** view"
     )
-    components.html(st.session_state.vr_html, height=680, scrolling=True)
+    if st.session_state.vr_url:
+        # ← FIX: st.iframe (with fallback), plus "open in new tab" link
+        render_iframe(st.session_state.vr_url, height=600)
+        st.caption(f"[Open in new tab ↗]({st.session_state.vr_url})")
+    else:
+        # Placeholder state — safe to render as HTML via markdown
+        st.markdown(st.session_state.vr_html, unsafe_allow_html=True)
